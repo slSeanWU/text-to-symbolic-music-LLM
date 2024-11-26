@@ -3,6 +3,7 @@ import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from transformers import GPT2LMHeadModel, LlamaForCausalLM
+from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 
 
 CACHE_DIR = "/workspace/.cache"
@@ -46,13 +47,13 @@ class GPT2WithLlamaConditioning(GPT2LMHeadModel):
             input_ids=llama_input_ids, attention_mask=llama_attention_mask, output_hidden_states=True
         )
         llama_hidden_states = llama_outputs.hidden_states[-1]  # Use last hidden state
-        print(llama_hidden_states.shape)
+        # print(llama_hidden_states.shape)
         projected_llama_hidden_states = self.llama_projection(llama_hidden_states)
 
         # Add Llama's states to GPT-2's input embeddings
         gpt2_inputs_embeds = self.transformer.wte(input_ids)
 
-        print(gpt2_inputs_embeds.shape, projected_llama_hidden_states.shape)
+        # print(gpt2_inputs_embeds.shape, projected_llama_hidden_states.shape)
 
         cond_seqlen = projected_llama_hidden_states.shape[1]
         gen_seqlen = gpt2_inputs_embeds.shape[1]
@@ -81,6 +82,7 @@ class GPT2WithLlamaConditioning(GPT2LMHeadModel):
 
         logits = outputs.logits
 
+        loss = None
         if labels is not None:
             # move labels to correct device to enable model parallelism
             labels = labels.to(logits.device)
@@ -92,7 +94,15 @@ class GPT2WithLlamaConditioning(GPT2LMHeadModel):
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
             outputs.loss = loss
 
-        return outputs
+
+        return CausalLMOutputWithCrossAttentions(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            cross_attentions=outputs.cross_attentions,
+        )
 
     def prepare_inputs_for_generation(
         self, input_ids, past=None, llama_hidden_states=None, **kwargs
