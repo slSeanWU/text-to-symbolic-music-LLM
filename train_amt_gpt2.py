@@ -70,10 +70,10 @@ if __name__ == "__main__":
         learning_rate=LR,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
-        max_steps=200,
-        save_steps=100,
+        max_steps=20,
+        save_steps=10,
         logging_dir="./logs",
-        eval_steps=100,
+        eval_steps=10,
         logging_steps=10,
         bf16=True,  # Enable mixed precision
         report_to="none",
@@ -81,6 +81,7 @@ if __name__ == "__main__":
         do_eval=True,
         eval_strategy="steps",
         gradient_accumulation_steps=16,
+        save_safetensors=False,
         # eval_on_start=True,
     )
 
