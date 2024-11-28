@@ -12,7 +12,7 @@ GPT2_PAD_ID = 55025   # `SEPARATOR` in anticipation
 
 
 class GPT2WithLlamaConditioning(GPT2LMHeadModel):
-    def __init__(self, config, llama_model_name):
+    def __init__(self, config, llama_model_name, new_max_seqlen=2048):
         super().__init__(config)
     
         # Load Llama model
@@ -27,10 +27,32 @@ class GPT2WithLlamaConditioning(GPT2LMHeadModel):
 
         # Linear layer to project Llama's hidden states to GPT-2's embedding space
         self.llama_projection = nn.Linear(
-            self.llama.config.hidden_size, config.n_embd
+            self.llama.config.hidden_size, config.n_embd, bias=False
         )
+        # initialize this with all zeros
+        # nn.init.zeros_(self.llama_projection.weight)
 
         self.transformer.wte.padding_idx = GPT2_PAD_ID
+        self.new_max_seqlen = new_max_seqlen
+
+
+    def extend_pos_emb(self):
+        if not self.new_max_seqlen > self.config.n_positions:
+            return
+        
+        # extend GPT-2's position embeddings
+        orig_emb = self.transformer.wpe.weight
+        self.transformer.wpe = nn.Embedding(self.new_max_seqlen, self.transformer.config.n_embd)
+        self.transformer.wpe.weight.data[:orig_emb.size(0)] = orig_emb.data
+
+        # move to model device and dtype
+        self.transformer.wpe.to(device=self.device, dtype=orig_emb.dtype)
+
+        # adjust variances -- tensor(0.0145, device='cuda:0', grad_fn=<StdBackward0>) tensor(0.9989, device='cuda:0', grad_fn=<StdBackward0>)
+        self.transformer.wpe.weight.data[orig_emb.size(0):] /= 100
+        assert self.transformer.wpe.weight.requires_grad
+
+        self.config.n_positions = self.new_max_seqlen
 
 
     def forward(
@@ -56,6 +78,7 @@ class GPT2WithLlamaConditioning(GPT2LMHeadModel):
         # print(gpt2_inputs_embeds.shape, projected_llama_hidden_states.shape)
 
         cond_seqlen = projected_llama_hidden_states.shape[1]
+        # cond_seqlen = 0
         gen_seqlen = gpt2_inputs_embeds.shape[1]
 
         concat_position_ids = torch.cat(
@@ -73,6 +96,7 @@ class GPT2WithLlamaConditioning(GPT2LMHeadModel):
         concat_input_embeds = torch.cat([projected_llama_hidden_states, gpt2_inputs_embeds], dim=1)
 
         # Forward pass through GPT-2
+
         outputs = super().forward(
             inputs_embeds=concat_input_embeds,
             position_ids=concat_position_ids,
@@ -90,7 +114,7 @@ class GPT2WithLlamaConditioning(GPT2LMHeadModel):
             shift_logits = logits[..., cond_seqlen:-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
-            loss_fct = CrossEntropyLoss(ignore_index=GPT2_PAD_ID)
+            loss_fct = CrossEntropyLoss()
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
             outputs.loss = loss
 
@@ -138,10 +162,12 @@ if __name__ == "__main__":
         llama_model_name=LLAMA_MODEL_NAME,
         cache_dir=CACHE_DIR,
         torch_dtype="bfloat16",
-        attn_implementation="flash_attention_2"
+        new_max_seqlen=1024,
     ).cuda()
+    # model.extend_pos_emb()
 
-    print(model.transformer.wte.padding_idx)
+    # print(model.transformer.wpe.weight[:10, :4])
+    # print(model.transformer.wpe.weight[:1024].std(), model.transformer.wpe.weight[1024:].std())
 
     # print trainable parameters count -- 782M
     print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
