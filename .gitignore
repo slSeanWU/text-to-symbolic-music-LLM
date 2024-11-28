@@ -163,3 +163,5 @@ cython_debug/
 
 
 quick_trials_*/
+
+**/debug*

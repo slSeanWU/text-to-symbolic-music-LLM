@@ -12,7 +12,7 @@ GPT2_PAD_ID = 55025   # `SEPARATOR` in anticipation
 
 
 class GPT2WithLlamaConditioning(GPT2LMHeadModel):
-    def __init__(self, config, llama_model_name, new_max_seqlen=2048):
+    def __init__(self, config, llama_model_name, new_max_seqlen=1024):
         super().__init__(config)
     
         # Load Llama model

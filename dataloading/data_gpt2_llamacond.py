@@ -2,6 +2,8 @@ import json
 import os
 import logging
 import glob
+import random
+import multiprocessing
 
 import torch
 from datasets import load_dataset
@@ -13,6 +15,7 @@ CACHE_DIR = "/workspace/.cache"
 LLAMA_PAD_ID = 128009 # "content": "<|eot_id|>"
 GPT2_PAD_ID = 55025   # `SEPARATOR` in anticipation
 
+TEXT_CACHE = "/workspace/.cache/midicaps_text_cache.json"
 
 class DataCollatorWithLlamaLeftPadding:
     def __init__(self):
@@ -146,6 +149,7 @@ class MidiCapsTextMusicForAMTDataset(Dataset):
         self.samples = json.load(open(split_file))[split]
         self.texts = self.read_texts()
         self.musics = self.read_musics()
+        self.musics_counter = {k: 0 for k, v in self.musics.items()}
 
         self.text_max_length = text_max_length
         self.music_max_length = music_max_length
@@ -154,31 +158,61 @@ class MidiCapsTextMusicForAMTDataset(Dataset):
 
 
     def read_texts(self):
-        texts = dict()
+        if not os.path.exists(TEXT_CACHE):
+            texts = dict()
 
-        ds = load_dataset("amaai-lab/MidiCaps", cache_dir=CACHE_DIR)["train"]
-        for example in ds:
-            texts[example["location"]] = example["caption"]
+            ds = load_dataset("amaai-lab/MidiCaps", cache_dir=CACHE_DIR)["train"]
+            for example in ds:
+                texts[example["location"]] = example["caption"]
+
+            with open(TEXT_CACHE, "w") as f:
+                jsonstring = json.dumps(texts, indent=4)
+                f.write(jsonstring + "\n")
+        else:
+            texts = json.load(open(TEXT_CACHE))
 
         print(f"[INFO] read {len(texts)} texts from MidiCaps dataset")
 
         return texts
-
-    def read_musics(self):
-        tokenized_music_files = glob.glob(os.path.join(self.tokenized_music_dir, "tokenized-*"))
-
+    
+    def _read_music_thread(self, music_file):
         music_tokens = dict()
+        lines = open(music_file).readlines()
 
-        for f in tokenized_music_files:
-            lines = open(f).readlines()
+        for l in lines:
+            music_id, token_text = l.strip().split(" | ")
+            tokens = [int(t) for t in token_text.split()]
 
-            for l in lines:
-                music_id, token_text = l.strip().split(" | ")
-                tokens = [int(t) for t in token_text.split()]
-
-                music_tokens[music_id] = tokens
+            if music_id in music_tokens:
+                music_tokens[music_id].append(tokens)
+            else:
+                music_tokens[music_id] = [tokens]
 
         return music_tokens
+
+    def read_musics(self):
+        if self.split == "train":
+            tokenized_music_files = glob.glob(os.path.join(self.tokenized_music_dir, "tokenized-*"))
+        elif self.split == "valid":
+            tokenized_music_files = glob.glob(os.path.join(self.tokenized_music_dir, "tokenized-events-e.txt"))
+        elif self.split == "test":
+            tokenized_music_files = glob.glob(os.path.join(self.tokenized_music_dir, "tokenized-events-f.txt"))
+        else:
+            raise ValueError(f"Invalid split: {self.split}")
+    
+
+        p = multiprocessing.Pool(len(tokenized_music_files))
+        args = []
+        for f in tokenized_music_files:
+            args.append((f,))
+        music_tokens = p.starmap(self._read_music_thread, args)
+
+        # concatenate returned dictionaries
+        all_music_tokens = dict()
+        for d in music_tokens:
+            all_music_tokens.update(d)
+
+        return all_music_tokens
 
     def pad_or_truncate_music_tokens(self, music_tokens):
         if len(music_tokens) > self.music_max_length:
@@ -196,6 +230,11 @@ class MidiCapsTextMusicForAMTDataset(Dataset):
 
         # Get text and tokenize it
         text = self.texts[sample_id]
+
+        # For CFG conditioning
+        if random.random() < 0.1 and self.split == "train":
+            text = ""
+
         text = self.text_tokenizer(
             text,
             return_tensors="pt",
@@ -206,6 +245,14 @@ class MidiCapsTextMusicForAMTDataset(Dataset):
 
         # Get music and tokenize it
         music = self.musics[sample_id]
+        n_seqs_for_sample = len(music)
+
+        if self.split == "train":
+            music = music[self.musics_counter[sample_id]]
+            self.musics_counter[sample_id] = (self.musics_counter[sample_id] + 1) % n_seqs_for_sample
+        else:
+            music = music[n_seqs_for_sample // 2]
+
         music = self.pad_or_truncate_music_tokens(music)
         music = torch.tensor(music, dtype=torch.long)
 
