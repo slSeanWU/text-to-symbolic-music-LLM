@@ -35,7 +35,12 @@ if __name__ == "__main__":
         llama_model_name=LLAMA_MODEL_NAME,
         cache_dir=CACHE_DIR,
         torch_dtype="bfloat16",
+        use_weighted_llama_states=True,
     ).cuda()
+
+    if model.use_weighted_llama_states:
+        print("Using weighted llama states")
+        print(model.llama_state_weights)
 
     print("total trainable params:", sum(p.numel() for p in model.parameters() if p.requires_grad))
     # exit()

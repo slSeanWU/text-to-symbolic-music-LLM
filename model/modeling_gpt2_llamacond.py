@@ -12,7 +12,9 @@ GPT2_PAD_ID = 55025   # `SEPARATOR` in anticipation
 
 
 class GPT2WithLlamaConditioning(GPT2LMHeadModel):
-    def __init__(self, config, llama_model_name, new_max_seqlen=1024):
+    def __init__(
+        self, config, llama_model_name, new_max_seqlen=1024, use_weighted_llama_states=False
+    ):
         super().__init__(config)
     
         # Load Llama model
@@ -24,11 +26,18 @@ class GPT2WithLlamaConditioning(GPT2LMHeadModel):
         )
         self.llama.requires_grad_(False)  # Freeze Llama for now (optional)
         self.llama.model.embed_tokens.padding_idx = LLAMA_PAD_ID
+        self.use_weighted_llama_states = use_weighted_llama_states
 
         # Linear layer to project Llama's hidden states to GPT-2's embedding space
         self.llama_projection = nn.Linear(
             self.llama.config.hidden_size, config.n_embd, bias=False
         )
+
+        # Weights over all layers of Llama's hidden states
+        if self.use_weighted_llama_states:
+            self.llama_state_weights = nn.Parameter(
+                torch.ones(self.llama.config.num_hidden_layers + 1,)
+            )
         # initialize this with all zeros
         # nn.init.zeros_(self.llama_projection.weight)
 
@@ -64,45 +73,65 @@ class GPT2WithLlamaConditioning(GPT2LMHeadModel):
         llama_attention_mask=None,
         **kwargs
     ):
-        # Get Llama's hidden states
-        llama_outputs = self.llama(
-            input_ids=llama_input_ids, attention_mask=llama_attention_mask, output_hidden_states=True
-        )
-        llama_hidden_states = llama_outputs.hidden_states[-1]  # Use last hidden state
-        # print(llama_hidden_states.shape)
-        projected_llama_hidden_states = self.llama_projection(llama_hidden_states)
+        past_key_values = kwargs.pop("past_key_values", None)
+        position_ids = kwargs.pop("position_ids", None)
 
-        # Add Llama's states to GPT-2's input embeddings
-        gpt2_inputs_embeds = self.transformer.wte(input_ids)
+        if past_key_values is None:
+            # Get Llama's hidden states
+            llama_outputs = self.llama(
+                input_ids=llama_input_ids, attention_mask=llama_attention_mask, output_hidden_states=True
+            )
 
-        # print(gpt2_inputs_embeds.shape, projected_llama_hidden_states.shape)
+            if not self.use_weighted_llama_states:
+                llama_hidden_states = llama_outputs.hidden_states[-1]  # Use last hidden state
+            else:
+                llama_hidden_states = torch.stack(llama_outputs.hidden_states, dim=-1)
+                llama_hidden_states = self.llama_state_weights.softmax(dim=-1) * llama_hidden_states
+                llama_hidden_states = llama_hidden_states.sum(dim=-1)
+            # print(llama_hidden_states.shape)
+            projected_llama_hidden_states = self.llama_projection(llama_hidden_states)
 
-        cond_seqlen = projected_llama_hidden_states.shape[1]
-        # cond_seqlen = 0
-        gen_seqlen = gpt2_inputs_embeds.shape[1]
+            # Add Llama's states to GPT-2's input embeddings
+            gpt2_inputs_embeds = self.transformer.wte(input_ids)
 
-        concat_position_ids = torch.cat(
-            [
-                torch.zeros(cond_seqlen, dtype=torch.long, device=projected_llama_hidden_states.device),
-                torch.arange(gen_seqlen, dtype=torch.long, device=projected_llama_hidden_states.device),
-            ],
-            dim=0
-        )
-        concat_position_ids = concat_position_ids.unsqueeze(0)
+            # print(gpt2_inputs_embeds.shape, projected_llama_hidden_states.shape)
 
-        # remove the positional embedding for the condition part
-        projected_llama_hidden_states -= self.transformer.wpe(concat_position_ids[:, :cond_seqlen])
+            cond_seqlen = projected_llama_hidden_states.shape[1]
+            # cond_seqlen = 0
+            gen_seqlen = gpt2_inputs_embeds.shape[1]
 
-        concat_input_embeds = torch.cat([projected_llama_hidden_states, gpt2_inputs_embeds], dim=1)
+            concat_position_ids = torch.cat(
+                [
+                    torch.zeros(cond_seqlen, dtype=torch.long, device=projected_llama_hidden_states.device),
+                    torch.arange(gen_seqlen, dtype=torch.long, device=projected_llama_hidden_states.device),
+                ],
+                dim=0
+            )
+            concat_position_ids = concat_position_ids.unsqueeze(0)
 
-        # Forward pass through GPT-2
+            # remove the positional embedding for the condition part
+            projected_llama_hidden_states -= self.transformer.wpe(concat_position_ids[:, :cond_seqlen])
 
-        outputs = super().forward(
-            inputs_embeds=concat_input_embeds,
-            position_ids=concat_position_ids,
-            attention_mask=attention_mask,
-            **kwargs
-        )
+            concat_input_embeds = torch.cat([projected_llama_hidden_states, gpt2_inputs_embeds], dim=1)
+
+            # Forward pass through GPT-2
+
+            outputs = super().forward(
+                inputs_embeds=concat_input_embeds,
+                position_ids=concat_position_ids,
+                attention_mask=attention_mask,
+                **kwargs
+            )
+        else:
+            assert position_ids is not None
+
+            outputs = super().forward(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                **kwargs
+            )
 
         logits = outputs.logits
 
@@ -128,27 +157,6 @@ class GPT2WithLlamaConditioning(GPT2LMHeadModel):
             cross_attentions=outputs.cross_attentions,
         )
 
-    def prepare_inputs_for_generation(
-        self, input_ids, past=None, llama_hidden_states=None, **kwargs
-    ):
-        # Pass Llama's hidden states during generation
-        inputs = super().prepare_inputs_for_generation(input_ids, past=past, **kwargs)
-        inputs["llama_hidden_states"] = llama_hidden_states
-        return inputs
-
-    def generate(self, llama_input_ids, llama_attention_mask, **kwargs):
-        # Compute Llama's hidden states once and pass them during generation
-        llama_outputs = self.llama(
-            input_ids=llama_input_ids,
-            attention_mask=llama_attention_mask,
-            output_hidden_states=True,
-        )
-        llama_hidden_states = self.llama_projection(llama_outputs.hidden_states[-1])
-
-        # Call GPT-2's generate method with conditioning
-        return super().generate(
-            llama_hidden_states=llama_hidden_states, **kwargs
-        )
 
 
 # NOTE(Shih-Lun): test script below
@@ -163,6 +171,7 @@ if __name__ == "__main__":
         cache_dir=CACHE_DIR,
         torch_dtype="bfloat16",
         new_max_seqlen=1024,
+        use_weighted_llama_states=True,
     ).cuda()
     # model.extend_pos_emb()
 
