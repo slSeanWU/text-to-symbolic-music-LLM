@@ -11,6 +11,7 @@ from transformers import (
     AutoTokenizer,
     Cache,
     DynamicCache,
+    GPT2LMHeadModel,
 )
 from transformers.models.llama.modeling_llama import (
     LlamaDecoderLayer,
@@ -38,8 +39,12 @@ class LlamaWithExpandedVocabModel(LlamaModel):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         if hasattr(config, "expanded_vocab_size"):
             self.expanded_vocab_size = config.expanded_vocab_size
-            self.expanded_embed_tokens = nn.Embedding(config.expanded_vocab_size, config.hidden_size, GPT2_PAD_ID)
-            self.expanded_embed_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+            self.expanded_embed_tokens = nn.Embedding(
+                config.expanded_vocab_size, config.expanded_vocab_dim, GPT2_PAD_ID
+            )
+            self.expanded_embed_proj = nn.Linear(
+                config.expanded_vocab_dim, config.hidden_size, bias=False
+            )
 
         self.layers = nn.ModuleList(
             [LlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
@@ -89,7 +94,7 @@ class LlamaWithExpandedVocabModel(LlamaModel):
             orig_vocab_positions = torch.lt(input_ids, self.vocab_size).to(
                 device=input_ids.device
             )
-            orig_vocab_positions.requires_grad_(False)
+            # orig_vocab_positions.requires_grad_(False)
 
             # clone input_ids for orig vocab positions and replace the rest with padding
             orig_input_ids = input_ids.clone()
@@ -208,14 +213,22 @@ class LlamaWithExpandedVocabModel(LlamaModel):
 
 
 class LlamaWithExpandedVocabForCausalLM(LlamaForCausalLM):
-    def __init__(self, config, expanded_vocab_size=None):
+    def __init__(
+            self,
+            config,
+            expanded_vocab_size=None,
+            expanded_vocab_dim=1280,
+            load_expanded_embed=False
+        ):
         super().__init__(config)
 
         if expanded_vocab_size is not None or hasattr(config, "expanded_vocab_size"):
             self.expanded_vocab_size = expanded_vocab_size or config.expanded_vocab_size
+            self.expanded_vocab_dim = expanded_vocab_dim or config.expanded_vocab_dim
 
             if not hasattr(config, "expanded_vocab_size"):
                 config.expanded_vocab_size = self.expanded_vocab_size
+                config.expanded_vocab_dim = self.expanded_vocab_dim
 
         self.model = LlamaWithExpandedVocabModel(config)
         self.vocab_size = config.vocab_size
@@ -224,9 +237,46 @@ class LlamaWithExpandedVocabForCausalLM(LlamaForCausalLM):
         if self.expanded_vocab_size is not None:
             self.expanded_lm_head = nn.Linear(config.hidden_size, self.expanded_vocab_size, bias=False)
 
+        self.load_expanded_embed = load_expanded_embed
+        self._expanded_embed_source = None
+
         # Initialize weights and apply final processing
         self.post_init()
 
+    
+    def init_expanded_embed_from_source(self, source_model_path):
+        if self.expanded_vocab_size is None:
+            return
+
+        if self.load_expanded_embed:
+            self._expanded_embed_source = source_model_path
+
+            # assume it's a GPT2 model
+            _source_model = GPT2LMHeadModel.from_pretrained(
+                source_model_path,
+                torch_dtype="bfloat16",
+                cache_dir=CACHE_DIR,
+            ).to(self.device)
+
+            assert _source_model.config.vocab_size == self.model.expanded_vocab_size
+
+            # record the stdev of default initialization
+            init_stdev = self.model.expanded_embed_tokens.weight.std()
+
+            # first zero out the expanded embeddings
+            self.model.expanded_embed_tokens.weight.data.zero_()
+
+            # only initialize the corresponding dimensions
+            _source_embeddings = _source_model.transformer.wte.weight.data
+            assert _source_embeddings.size() == self.model.expanded_embed_tokens.weight.size()
+            self.model.expanded_embed_tokens.weight.data = _source_embeddings
+
+            # equalize the stdev of the initialized embeddings
+            self.model.expanded_embed_tokens.weight.data *= (
+                init_stdev / self.model.expanded_embed_tokens.weight.std()
+            )
+
+            assert self.model.expanded_embed_tokens.weight.requires_grad
     
     def forward(
         self,
@@ -256,7 +306,7 @@ class LlamaWithExpandedVocabForCausalLM(LlamaForCausalLM):
         orig_vocab_positions = torch.lt(input_ids, self.vocab_size).to(
             device=input_ids.device
         )
-        orig_vocab_positions.requires_grad_(False)
+        # orig_vocab_positions.requires_grad_(False)
         # left shift by 1 to account for next-token prediction
         orig_vocab_positions = torch.roll(orig_vocab_positions, shifts=-1, dims=-1)
 
@@ -322,7 +372,7 @@ class LlamaWithExpandedVocabForCausalLM(LlamaForCausalLM):
 # NOTE(Shih-Lun): test script below
 if __name__ == "__main__":
     import os
-    os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
     LLAMA_MODEL_NAME = "meta-llama/Llama-3.2-1B"
 
@@ -332,6 +382,7 @@ if __name__ == "__main__":
         expanded_vocab_size=GPT2_VOCAB_SIZE,
         cache_dir=CACHE_DIR,
         torch_dtype="bfloat16",
+        attn_implementation="flash_attention_2",
     ).cuda()
     print("[INFO] Model loaded")
     print(model.expanded_vocab_size, model.model.expanded_vocab_size)

@@ -12,14 +12,19 @@ from transformers import AutoTokenizer
 
 
 CACHE_DIR = "/workspace/.cache"
+LLAMA_VOCAB_SIZE = 128256
 LLAMA_PAD_ID = 128009 # "content": "<|eot_id|>"
 GPT2_PAD_ID = 55025   # `SEPARATOR` in anticipation
 
 TEXT_CACHE = "/workspace/.cache/midicaps_text_cache.json"
 
 class DataCollatorWithLlamaLeftPadding:
-    def __init__(self):
+    def __init__(self, use_text_model=False):
         self.padding_token_id = LLAMA_PAD_ID
+        self.use_text_model = use_text_model
+
+        if self.use_text_model:
+            self.expanded_padding_token_id = GPT2_PAD_ID + LLAMA_VOCAB_SIZE
 
     def __call__(self, features):
         # Get the max sequence length in the batch
@@ -47,14 +52,73 @@ class DataCollatorWithLlamaLeftPadding:
                 input_ids.append(seq)
                 attention_mask.append([1] * seq_length)
 
+            if self.use_text_model:
+                input_ids[-1].extend(list(feature["input_ids"]))
+                attention_mask[-1].extend([1] * len(feature["input_ids"]))
+                del feature["llama_input_ids"]
+
         # Convert to tensors
         input_ids = torch.tensor(input_ids, dtype=torch.long)
         attention_mask = torch.tensor(attention_mask, dtype=torch.long)
 
+
+        if not self.use_text_model:
+            batch = {
+                "llama_input_ids": input_ids,
+                "llama_attention_mask": attention_mask,
+            }
+        else:
+            labels = input_ids.clone()
+            labels[labels == self.padding_token_id] = -100
+            labels[labels == self.expanded_padding_token_id] = -100
+            batch = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels,
+            }
+
+        for key in features[0]:
+            if key not in batch:
+                batch[key] = torch.tensor([list(f[key]) for f in features], dtype=torch.long)
+
+        return batch
+
+
+class DataCollatorWithGPTRightPadding:
+    def __init__(self):
+        self.padding_token_id = GPT2_PAD_ID + LLAMA_VOCAB_SIZE
+
+    def __call__(self, features):
+        # Get the max sequence length in the batch
+        max_length = max(len(f["input_ids"]) for f in features)
+
+        # Prepare left-padded inputs and masks
+        input_ids = []
+
+        for feature in features:
+            seq = list(feature["input_ids"])
+            seq_length = len(seq)
+
+            if seq_length < max_length:
+                padding_length = max_length - seq_length
+
+                # Right-pad the sequence
+                padded_seq = seq + [self.padding_token_id] * padding_length
+                input_ids.append(padded_seq)
+            else:
+                input_ids.append(seq)
+
+        # Convert to tensors
+        input_ids = torch.tensor(input_ids, dtype=torch.long)
+        labels = input_ids.clone()
+        
+        # Replace paddings with -100
+        labels[labels == self.padding_token_id] = -100
+
         # Return batch dictionary
         batch = {
-            "llama_input_ids": input_ids,
-            "llama_attention_mask": attention_mask,
+            "input_ids": input_ids,
+            "labels": labels,
         }
 
         for key in features[0]:
@@ -66,7 +130,13 @@ class DataCollatorWithLlamaLeftPadding:
 
 class RandomTestTextMusicDataset(Dataset):
     """Just to test out model training & implementation"""
-    def __init__(self, llama_model_name, music_max_length=1024, text_max_length=256):
+    def __init__(
+        self,
+        llama_model_name,
+        music_max_length=1024,
+        text_max_length=256,
+        use_text_model=False,
+    ):
         self.text_tokenizer = AutoTokenizer.from_pretrained(
             llama_model_name,
             cache_dir=CACHE_DIR,
@@ -90,6 +160,7 @@ class RandomTestTextMusicDataset(Dataset):
 
         self.text_max_length = text_max_length
         self.music_max_length = music_max_length
+        self.use_text_model = use_text_model
 
     def __len__(self):
         return len(self.text)
@@ -100,6 +171,7 @@ class RandomTestTextMusicDataset(Dataset):
 
         # Get text and tokenize it
         text = self.text[idx]
+
         text = self.text_tokenizer(
             text,
             return_tensors="pt",
@@ -112,18 +184,27 @@ class RandomTestTextMusicDataset(Dataset):
         music = torch.randint(0, 388, (music_seqlen,))
         if len(music) > self.music_max_length:
             music = music[:self.music_max_length]
-        else:
+        if len(music) < self.music_max_length:
             music = torch.cat([
                 music,
                 torch.full((self.music_max_length - len(music),), fill_value=GPT2_PAD_ID, dtype=music.dtype)
             ])
 
-        return {
-            "input_ids": music,
-            "labels": music,
-            "llama_input_ids": text["input_ids"][0],
-            "llama_attention_mask": text["attention_mask"][0],
-        }
+        if not self.use_text_model:
+            return {
+                "input_ids": music,
+                "labels": music,
+                "llama_input_ids": text["input_ids"][0],
+                "llama_attention_mask": text["attention_mask"][0],
+            }
+
+        else:
+            music += LLAMA_VOCAB_SIZE
+
+            return {
+                "input_ids": music,
+                "llama_input_ids": text["input_ids"][0],
+            }
 
 
 class MidiCapsTextMusicForAMTDataset(Dataset):
@@ -135,7 +216,8 @@ class MidiCapsTextMusicForAMTDataset(Dataset):
             tokenized_music_dir,
             split="train",
             music_max_length=1024,
-            text_max_length=256
+            text_max_length=256,
+            use_text_model=False,
         ):
         self.text_tokenizer = AutoTokenizer.from_pretrained(
             llama_model_name,
@@ -153,6 +235,7 @@ class MidiCapsTextMusicForAMTDataset(Dataset):
 
         self.text_max_length = text_max_length
         self.music_max_length = music_max_length
+        self.use_text_model = use_text_model
 
         print(f"[INFO] loaded {split} split with {len(self.samples)} samples")
 
@@ -232,8 +315,17 @@ class MidiCapsTextMusicForAMTDataset(Dataset):
         text = self.texts[sample_id]
 
         # For CFG conditioning
-        if random.random() < 0.1 and self.split == "train":
-            text = ""
+        if self.split == "train":
+            if random.random() < 0.1:
+                if self.use_text_model:
+                    text = "You are a world-class composer. Please compose some music."
+                else:
+                    text = ""
+            else:
+                if self.use_text_model:
+                    text = "You are a world-class composer. Please compose some music according to the following description: " + text
+                else:
+                    text = text
 
         text = self.text_tokenizer(
             text,
@@ -256,16 +348,22 @@ class MidiCapsTextMusicForAMTDataset(Dataset):
         music = self.pad_or_truncate_music_tokens(music)
         music = torch.tensor(music, dtype=torch.long)
 
-        # replace GPT2_PAD_ID with -100
-        music_labels = music.clone()
-        music_labels[music_labels == GPT2_PAD_ID] = -100
+        if not self.use_text_model:
+            # replace GPT2_PAD_ID with -100
+            music_labels = music.clone()
+            music_labels[music_labels == GPT2_PAD_ID] = -100
 
-        return {
-            "input_ids": music,
-            "labels": music_labels,
-            "llama_input_ids": text["input_ids"][0],
-            "llama_attention_mask": text["attention_mask"][0],
-        }
+            return {
+                "input_ids": music,
+                "labels": music_labels,
+                "llama_input_ids": text["input_ids"][0],
+                "llama_attention_mask": text["attention_mask"][0],
+            }
+        else:
+            return {
+                "llama_input_ids": text["input_ids"][0],
+                "input_ids": music + LLAMA_VOCAB_SIZE,
+            }
 
 
 if __name__ == "__main__":
@@ -274,18 +372,24 @@ if __name__ == "__main__":
 
 
     # dataset = RandomTestTextMusicDataset("meta-llama/Llama-3.2-1B")
-    # dataset = MidiCapsTextMusicForAMTDataset(
-    #     "meta-llama/Llama-3.2-1B",
-    #     "/workspace/scratch-slseanwu/text-to-symbolic-music-LLM/splits_updated.json",
-    #     "/workspace/shared/data/lmd_full_tokenized",
-    #     split="valid",
-    #     music_max_length=1024,
-    # )
+    dataset = MidiCapsTextMusicForAMTDataset(
+        "meta-llama/Llama-3.2-1B",
+        "/workspace/scratch-slseanwu/text-to-symbolic-music-LLM/splits_updated_2.json",
+        "/workspace/shared/data/lmd_full_tokenized",
+        split="valid",
+        music_max_length=1024,
+        use_text_model=True,
+    )
 
-    model = AutoModelForCausalLM.from_pretrained(
-        "stanford-crfm/music-large-800k",
-        torch_dtype="bfloat16",
-    ).cuda()
+    for i in range(100):
+        dataset[i]
+
+    exit()
+
+    # model = AutoModelForCausalLM.from_pretrained(
+    #     "stanford-crfm/music-large-800k",
+    #     torch_dtype="bfloat16",
+    # ).cuda()
 
     def parse_amt_tokens(token_file):
         lines = open(token_file).readlines()
