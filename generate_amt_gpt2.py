@@ -1,14 +1,30 @@
+import os
+import sys
+
 import torch
+import tqdm
 from torch import nn
 from transformers import AutoTokenizer, AutoModelForCausalLM, GPT2LMHeadModel
 from anticipation.convert import events_to_midi
 
 from model.modeling_gpt2_llamacond import GPT2WithLlamaConditioning
+from utils.generation import (
+    read_text_prompts,
+    synthesize_midi,
+    write_events_and_midi,
+)
 
 CACHE_DIR = "/workspace/.cache"
 LLAMA_MODEL_NAME = "meta-llama/Llama-3.2-1B"
 GPT2_BOS_ID = 55026
 TOP_P = 0.98
+
+CKPT_DIR = sys.argv[1]
+
+if len(sys.argv) > 2:
+    OUTDIR_SUFFIX = sys.argv[2]
+else:
+    OUTDIR_SUFFIX = None
 
 def sample_nucleus(scores: torch.FloatTensor, top_p: float, min_tokens_to_keep: int = 1):
     sorted_logits, sorted_indices = torch.sort(scores, descending=False)
@@ -72,34 +88,65 @@ if __name__ == "__main__":
     #     cache_dir=CACHE_DIR,
     # ).cuda()
     model = GPT2WithLlamaConditioning.from_pretrained(
-        "/workspace/shared/ckpt/amt_llama_text_cond/plain_24-11-28/checkpoint-5000",
+        CKPT_DIR,
         llama_model_name=LLAMA_MODEL_NAME,
         cache_dir=CACHE_DIR,
         torch_dtype="bfloat16",
+        use_weighted_llama_states="weighted" in CKPT_DIR,
     ).cuda()
     print("[INFO] Model loaded")
+
+    if model.use_weighted_llama_states:
+        print("Using weighted llama states")
+        print(model.llama_state_weights)
+        print(model.llama_state_weights.requires_grad)
+    
     model.eval()
+
+
 
     tokenizer = AutoTokenizer.from_pretrained(
         LLAMA_MODEL_NAME,
         cache_dir=CACHE_DIR,
     )
 
+    if OUTDIR_SUFFIX is None:
+        output_root = os.path.join(CKPT_DIR, "generations")
+    else:
+        output_root = os.path.join(CKPT_DIR, f"generations_{OUTDIR_SUFFIX}")
+
     # Input prompt
-    prompt = "A melodic and relaxing pop song with a touch of electronic elements, featuring a piano lead accompanied by electric bass, clean electric guitar, Hammond organ, and drums. Set in the key of C# major with a 4/4 time signature, this short song moves at an Adagio tempo, evoking a sense of love and creating a cinematic atmosphere."
+    prompts = read_text_prompts()
 
     # Tokenize the input prompt
-    llama_input_ids = tokenizer.encode(prompt, return_tensors="pt").cuda()
-    input_ids = torch.tensor([[GPT2_BOS_ID]]).long().cuda()
+    for i in tqdm.tqdm(range(len(prompts))):
+        key, prompt = prompts[i]
+        print(f"[INFO] Generating for {key} ...")
+        print(f"[INFO] Prompt: {prompt}")
+        llama_input_ids = tokenizer.encode(prompt, return_tensors="pt").cuda()
+        input_ids = torch.tensor([[GPT2_BOS_ID]]).long().cuda()
 
-    print("[INFO] Start generation ...")
-    # Generate text
-    output = nucleus_amt_generate(model, llama_input_ids, max_new_tokens=1023)
+        print("[INFO] Start generation ...")
+        # Generate text
+        output = nucleus_amt_generate(model, llama_input_ids, max_new_tokens=1023)
 
-    # Decode and print the output
-    print(output)
+        # Decode and print the output
+        # print(output)
 
-    mid = events_to_midi(output)
-    mid.save("/workspace/shared/outputs/test.mid")
+        midi_path = write_events_and_midi(output, prompt, key, output_root)
+        synthesize_midi(midi_path)
+
+    # llama_input_ids = tokenizer.encode(prompt, return_tensors="pt").cuda()
+    # input_ids = torch.tensor([[GPT2_BOS_ID]]).long().cuda()
+
+    # print("[INFO] Start generation ...")
+    # # Generate text
+    # output = nucleus_amt_generate(model, llama_input_ids, max_new_tokens=1023)
+
+    # # Decode and print the output
+    # print(output)
+
+    # mid = events_to_midi(output)
+    # mid.save("/workspace/shared/outputs/test.mid")
     # generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
     # print(generated_text)

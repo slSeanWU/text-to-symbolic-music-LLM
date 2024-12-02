@@ -1,9 +1,9 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 import sys
 
 import bitsandbytes as bnb
-from datasets import load_dataset
+import torch
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, GPT2LMHeadModel
 from torch.utils.data import SequentialSampler, Subset
@@ -18,14 +18,14 @@ from dataloading.data_gpt2_llamacond import (
     DataCollatorWithLlamaLeftPadding,
 )
 
-LLAMA_MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+LLAMA_MODEL_NAME = "meta-llama/Llama-3.2-3B"
 CACHE_DIR = "/workspace/.cache"
 SPLIT_FILE = "/workspace/scratch-slseanwu/text-to-symbolic-music-LLM/splits_updated_2.json"
 CKPT_DIR = sys.argv[1]
 SEQLEN = 1024
-LR = 1e-5
+LR = 2e-4
 GPT2_MODEL_NAME = "stanford-crfm/music-large-800k"
-USE_GPT2_EMBEDDINGS = True
+USE_GPT2_EMBEDDINGS = False
 
 
 class SequentialTrainer(Trainer):
@@ -41,7 +41,7 @@ if __name__ == "__main__":
         cache_dir=CACHE_DIR,
         torch_dtype="bfloat16",
         expanded_vocab_size=GPT2_VOCAB_SIZE,
-        attn_implementation="flash_attention_2"
+        attn_implementation="flash_attention_2",
     ).cuda()
 
     if USE_GPT2_EMBEDDINGS:
@@ -88,7 +88,7 @@ if __name__ == "__main__":
             split="valid",
             music_max_length=SEQLEN,
             use_text_model=True,
-        ), range(200)
+        ), range(4000)
     )
 
     # optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LR) 
@@ -100,26 +100,27 @@ if __name__ == "__main__":
         learning_rate=LR,
         per_device_train_batch_size=4,
         per_device_eval_batch_size=8,
-        warmup_steps=100,
-        lr_scheduler_type="constant_with_warmup",
-        max_steps=500,
-        save_steps=500,
+        warmup_steps=500,
+        lr_scheduler_type="cosine",
+        max_steps=15000,
+        save_steps=250,
         logging_dir="./logs",
-        eval_steps=100,
+        eval_steps=250,
         logging_steps=10,
         bf16=True,  # Enable mixed precision
         report_to="none",
-        dataloader_num_workers=4,
+        dataloader_num_workers=8,
         do_eval=True,
         eval_strategy="steps",
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=16,
         save_safetensors=False,
         eval_on_start=True,
         remove_unused_columns=False,
+        eval_accumulation_steps=32,
     )
 
     # Trainer
-    trainer = SequentialTrainer(
+    trainer = Trainer(
         model=model,
         data_collator=DataCollatorWithLlamaLeftPadding(use_text_model=True),
         args=training_args,

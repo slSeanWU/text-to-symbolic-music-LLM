@@ -36,7 +36,7 @@ class GPT2WithLlamaConditioning(GPT2LMHeadModel):
         # Weights over all layers of Llama's hidden states
         if self.use_weighted_llama_states:
             self.llama_state_weights = nn.Parameter(
-                torch.ones(self.llama.config.num_hidden_layers + 1,)
+                torch.zeros(self.llama.config.num_hidden_layers + 1,)
             )
         # initialize this with all zeros
         # nn.init.zeros_(self.llama_projection.weight)

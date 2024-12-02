@@ -39,12 +39,8 @@ class LlamaWithExpandedVocabModel(LlamaModel):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         if hasattr(config, "expanded_vocab_size"):
             self.expanded_vocab_size = config.expanded_vocab_size
-            self.expanded_embed_tokens = nn.Embedding(
-                config.expanded_vocab_size, config.expanded_vocab_dim, GPT2_PAD_ID
-            )
-            self.expanded_embed_proj = nn.Linear(
-                config.expanded_vocab_dim, config.hidden_size, bias=False
-            )
+            self.expanded_embed_tokens = nn.Embedding(config.expanded_vocab_size, config.hidden_size, GPT2_PAD_ID)
+            self.expanded_embed_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
 
         self.layers = nn.ModuleList(
             [LlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
@@ -213,22 +209,14 @@ class LlamaWithExpandedVocabModel(LlamaModel):
 
 
 class LlamaWithExpandedVocabForCausalLM(LlamaForCausalLM):
-    def __init__(
-            self,
-            config,
-            expanded_vocab_size=None,
-            expanded_vocab_dim=1280,
-            load_expanded_embed=False
-        ):
+    def __init__(self, config, expanded_vocab_size=None, load_expanded_embed=False):
         super().__init__(config)
 
         if expanded_vocab_size is not None or hasattr(config, "expanded_vocab_size"):
             self.expanded_vocab_size = expanded_vocab_size or config.expanded_vocab_size
-            self.expanded_vocab_dim = expanded_vocab_dim or config.expanded_vocab_dim
 
             if not hasattr(config, "expanded_vocab_size"):
                 config.expanded_vocab_size = self.expanded_vocab_size
-                config.expanded_vocab_dim = self.expanded_vocab_dim
 
         self.model = LlamaWithExpandedVocabModel(config)
         self.vocab_size = config.vocab_size
@@ -268,12 +256,11 @@ class LlamaWithExpandedVocabForCausalLM(LlamaForCausalLM):
 
             # only initialize the corresponding dimensions
             _source_embeddings = _source_model.transformer.wte.weight.data
-            assert _source_embeddings.size() == self.model.expanded_embed_tokens.weight.size()
-            self.model.expanded_embed_tokens.weight.data = _source_embeddings
+            self.model.expanded_embed_tokens.weight.data[:, :_source_embeddings.size(1)] = _source_embeddings
 
             # equalize the stdev of the initialized embeddings
-            self.model.expanded_embed_tokens.weight.data *= (
-                init_stdev / self.model.expanded_embed_tokens.weight.std()
+            self.model.expanded_embed_tokens.weight.data[:, :_source_embeddings.size(1)] *= (
+                init_stdev / self.model.expanded_embed_tokens.weight[:, :_source_embeddings.size(1)].std()
             )
 
             assert self.model.expanded_embed_tokens.weight.requires_grad
@@ -309,6 +296,10 @@ class LlamaWithExpandedVocabForCausalLM(LlamaForCausalLM):
         # orig_vocab_positions.requires_grad_(False)
         # left shift by 1 to account for next-token prediction
         orig_vocab_positions = torch.roll(orig_vocab_positions, shifts=-1, dims=-1)
+
+        # TODO(Shih-Lun): should have a less hacky way for generation
+        if num_logits_to_keep == 1:
+            orig_vocab_positions[:, -1] = False
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
