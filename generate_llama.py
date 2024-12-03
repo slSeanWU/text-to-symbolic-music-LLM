@@ -49,6 +49,13 @@ if __name__ == "__main__":
     print("trainable params:", sum(p.numel() for p in model.parameters() if p.requires_grad))
     model.eval()
 
+    if "1b" in CKPT_DIR:  
+        # WARNING: 1B model would sometimes degenerate w/ temp 1.0
+        # workaround: add timeout to fluidsynth synthesizer to skip degenerate samples
+        TEMPERATURE = 1.0
+    else:
+        TEMPERATURE = 1.0
+
     tokenizer = AutoTokenizer.from_pretrained(
         LLAMA_MODEL_NAME,
         cache_dir=CACHE_DIR,
@@ -112,7 +119,7 @@ if __name__ == "__main__":
                 do_sample=True,
                 max_new_tokens=SEQLEN - 1,
                 top_p=TOP_P,
-                temperature=1.0,
+                temperature=TEMPERATURE,
                 num_return_sequences=1,
             )
 
