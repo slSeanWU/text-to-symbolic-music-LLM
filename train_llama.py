@@ -25,7 +25,7 @@ CKPT_DIR = sys.argv[1]
 SEQLEN = 1024
 LR = 2e-4
 GPT2_MODEL_NAME = "stanford-crfm/music-large-800k"
-USE_GPT2_EMBEDDINGS = False
+USE_GPT2_EMBEDDINGS = True
 
 
 class SequentialTrainer(Trainer):
@@ -103,7 +103,7 @@ if __name__ == "__main__":
         warmup_steps=500,
         lr_scheduler_type="cosine",
         max_steps=15000,
-        save_steps=250,
+        save_steps=500,
         logging_dir="./logs",
         eval_steps=250,
         logging_steps=10,

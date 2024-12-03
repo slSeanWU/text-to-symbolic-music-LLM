@@ -14,7 +14,6 @@ from utils.generation import (
     output_text_and_synthesize,
 )
 
-
 CACHE_DIR = "/workspace/.cache"
 GPT2_MODEL_NAME = "stanford-crfm/music-large-800k"
 GPT2_BOS_ID = 55026
@@ -48,7 +47,7 @@ if __name__ == "__main__":
     model.eval()
     
 
-    # Input prompt
+    # Input prompt example
     # prompt = (
     #     "You are a world-class composer. Please compose some music according to the following description: "
     #     "A melodic and relaxing pop song with a touch of electronic elements, "
@@ -57,7 +56,8 @@ if __name__ == "__main__":
     #     "this short song moves at an Adagio tempo, evoking a sense of love and creating a "
     #     "cinematic atmosphere."
     # )
-    # Input prompt
+
+    # Input prompts
     all_prompts = read_text_prompts(max_samples=N_EVAL_SAMPLES)
 
     if OUTDIR_SUFFIX is None:
@@ -73,7 +73,7 @@ if __name__ == "__main__":
         print(f"[INFO] Prompt: {prompts}")
 
         # Tokenize the input prompt
-        input_ids = torch.tensor([[GPT2_BOS_ID]] * BATCH_SIZE).long().cuda()
+        input_ids = torch.tensor([[GPT2_BOS_ID]] * len(prompts)).long().cuda()
         print(input_ids)
         
         prompt_len = input_ids.size(1)
@@ -82,7 +82,7 @@ if __name__ == "__main__":
         print("[INFO] Start generation ...")
         # Generate text
         with torch.no_grad():
-            output = model.generate(
+            outputs = model.generate(
                 input_ids=input_ids,
                 do_sample=True,
                 max_new_tokens=SEQLEN - 1,
@@ -90,16 +90,16 @@ if __name__ == "__main__":
                 num_return_sequences=1,
             )
 
-        print(output)
+        print(outputs)
 
-        output = output[:, prompt_len:]
-        print(output[:, :30])
-        output = output.cpu().tolist()
+        outputs = outputs[:, prompt_len:]
+        print(outputs[:, :30])
+        outputs = outputs.cpu().tolist()
 
         args = []
         p = Pool(BATCH_SIZE)
 
-        for key, prompt, output in zip(keys, prompts, output):
+        for key, prompt, output in zip(keys, prompts, outputs):
             args.append((output, prompt, output_root, key))
 
         p.starmap(output_text_and_synthesize, args)

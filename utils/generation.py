@@ -69,11 +69,11 @@ def output_text_and_synthesize(events, text, output_root, file_id):
     try:
         midi_path = write_events_and_midi(events, text, file_id, output_root)
         synthesize_midi(midi_path, save_mp3_only=True)
-    except:
+    except Exception as e:
+        # print(e)
         return False
     
     return True
-
 
 if __name__ == "__main__":
     text_prompts = read_text_prompts()
