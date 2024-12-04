@@ -1,0 +1,13 @@
+import os
+import glob
+import json
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+
+import torch
+import laion_clap
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+
+model = laion_clap.CLAP_Module(enable_fusion=False, amodel="HTSAT-base")
+model.load_ckpt(model_id=0)

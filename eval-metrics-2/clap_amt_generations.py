@@ -16,6 +16,9 @@ import sys
 file_dir = os.path.dirname(__file__)
 sys.path.append(file_dir)
 
+import warnings
+warnings.filterwarnings("ignore")
+
 
 class newCLAPModule(laion_clap.CLAP_Module):
     def load_ckpt(self, ckpt = None, model_id = -1, verbose = True):
@@ -59,7 +62,7 @@ class newCLAPModule(laion_clap.CLAP_Module):
                     print('Download completed!')
             print('Load Checkpoint...')
             ckpt = load_state_dict(ckpt, skip_params=True)
-            self.model.load_state_dict(ckpt, strict=False)
+            self.model.load_state_dict(ckpt)
             if verbose:
                 param_names = [n for n, p in self.model.named_parameters()]
                 for n in param_names:
@@ -70,32 +73,42 @@ model = newCLAPModule(enable_fusion=False, amodel="HTSAT-base")
 
 model.load_ckpt(model_id=4)
 
-GEN_DIR = "/root/workspace/shared/data/lmd_full_testset_first_3k"
+GEN_DIR = "../shared/outputs/amt_large_baseline/generations"
 
 
 def write_scores(scores):
     pass
-
 
 if __name__ == "__main__":
     subdirs = os.listdir(GEN_DIR)
     scores = dict()
     all_scores = []
 
-    for sd in subdirs:
-        if sd == "clap_scores.json":
-            break
-        text_prompt = (
-            f"A solo played by the {' '.join(sd.split('_')).title()} instrument"
-        )
-        
-        with open("/root/small_audiollm_set_241120/"+sd+"/caption.txt", "r") as file:
-            text_prompt = file.read()
-        
-        print(text_prompt)
+    print(subdirs)
 
-        audio_files = glob.glob(os.path.join(GEN_DIR, sd, "*.mp3"))
-        # print(audio_files)
+    for sd in subdirs:
+        if sd == "clap_scores_amt_generations.json":
+            continue
+
+        subdir_path_mp3 = os.path.join("../shared/outputs/amt_large_baseline/generations", sd)
+        print(subdir_path_mp3)
+        subdir_path = os.path.join(GEN_DIR, sd)
+
+        audio_files = glob.glob("../shared/outputs/amt_large_baseline/generations/" + sd + ".mp3")
+        
+        if not audio_files:
+            print(f"Skipping {sd} - no .mp3 files found.")
+            continue
+
+        prompt_path = os.path.join(subdir_path, "prompt.txt")
+        try:
+            with open(prompt_path, "r") as file:
+                text_prompt = file.read().replace("\n", " ")
+        except FileNotFoundError:
+            print(f"Skipping {sd} - prompt.txt not found.")
+            continue
+
+        print(f"Processed prompt for {sd}: {text_prompt}")
 
         with torch.no_grad():
             audio_embs = model.get_audio_embedding_from_filelist(
@@ -106,7 +119,7 @@ if __name__ == "__main__":
             text_embs = text_embs.repeat(audio_embs.size(0), 1)
 
             print(audio_embs.size(), text_embs.size())
-
+        # Compute cosine similarities
         cos_sims = cosine_similarity(
             audio_embs.cpu().numpy(), text_embs.cpu().numpy()
         ).diagonal()
@@ -128,7 +141,7 @@ if __name__ == "__main__":
     }
 
     scores_str = json.dumps(scores, indent=4)
-    with open(os.path.join(GEN_DIR, "clap_scores.json"), "w") as f:
+    with open(os.path.join(GEN_DIR, "clap_scores_amt_generations.json"), "w") as f:
         f.write(scores_str + "\n")
 
     print(scores_str)
